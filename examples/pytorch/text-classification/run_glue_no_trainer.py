@@ -55,15 +55,7 @@ logger = get_logger(__name__)
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/text-classification/requirements.txt")
 
 task_to_keys = {
-    "cola": ("sentence", None),
-    "mnli": ("premise", "hypothesis"),
-    "mrpc": ("sentence1", "sentence2"),
-    "qnli": ("question", "sentence"),
-    "qqp": ("question1", "question2"),
-    "rte": ("sentence1", "sentence2"),
-    "sst2": ("sentence", None),
-    "stsb": ("sentence1", "sentence2"),
-    "wnli": ("sentence1", "sentence2"),
+    "newsflash/twitter":("title","content")
 }
 
 
@@ -206,7 +198,7 @@ def parse_args():
     else:
         if args.train_file is not None:
             extension = args.train_file.split(".")[-1]
-            assert extension in ["csv", "json"], "`train_file` should be a csv or a json file."
+            assert extension in ["csv", "json", "jsonl"], "`train_file` should be a csv or a json file."
         if args.validation_file is not None:
             extension = args.validation_file.split(".")[-1]
             assert extension in ["csv", "json"], "`validation_file` should be a csv or a json file."
@@ -221,13 +213,14 @@ def main():
     args = parse_args()
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_glue_no_trainer", args)
+    # this is very time-consuming, we don't report to hugging face hub til now.
+    # send_example_telemetry("run_glue_no_trainer", args)
 
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers
     # in the environment
     accelerator = (
-        Accelerator(log_with=args.report_to, project_dir=args.output_dir) if args.with_tracking else Accelerator()
+        Accelerator(mixed_precision='fp16', log_with=args.report_to, project_dir=args.output_dir) if args.with_tracking else Accelerator()
     )
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -280,23 +273,16 @@ def main():
 
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
-    if args.task_name is not None:
-        # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset("glue", args.task_name)
+    if args.task_name == "newsflash/twitter":
+        raw_datasets = load_dataset("json", data_files=args.train_file)["train"]
+        raw_datasets = raw_datasets.train_test_split(test_size=0.15, seed= args.seed, shuffle=True)
     else:
-        # Loading the dataset from local csv or json file.
-        data_files = {}
-        if args.train_file is not None:
-            data_files["train"] = args.train_file
-        if args.validation_file is not None:
-            data_files["validation"] = args.validation_file
-        extension = (args.train_file if args.train_file is not None else args.validation_file).split(".")[-1]
-        raw_datasets = load_dataset(extension, data_files=data_files)
+        raw_datasets = load_dataset("glue", args.task_name)
     # See more about loading any type of standard or custom dataset at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
     # Labels
-    if args.task_name is not None:
+    if args.task_name not in task_to_keys.keys():
         is_regression = args.task_name == "stsb"
         if not is_regression:
             label_list = raw_datasets["train"].features["label"].names
@@ -408,7 +394,7 @@ def main():
         )
 
     train_dataset = processed_datasets["train"]
-    eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
+    eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "test"]
 
     # Log a few random samples from the training set:
     for index in random.sample(range(len(train_dataset)), 3):
@@ -635,25 +621,25 @@ def main():
             if args.push_to_hub:
                 repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
 
-    if args.task_name == "mnli":
-        # Final evaluation on mismatched validation set
-        eval_dataset = processed_datasets["validation_mismatched"]
-        eval_dataloader = DataLoader(
-            eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
-        )
-        eval_dataloader = accelerator.prepare(eval_dataloader)
+    # if args.task_name == "mnli":
+    #     # Final evaluation on mismatched validation set
+    #     eval_dataset = processed_datasets["validation_mismatched"]
+    #     eval_dataloader = DataLoader(
+    #         eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
+    #     )
+    #     eval_dataloader = accelerator.prepare(eval_dataloader)
 
-        model.eval()
-        for step, batch in enumerate(eval_dataloader):
-            outputs = model(**batch)
-            predictions = outputs.logits.argmax(dim=-1)
-            metric.add_batch(
-                predictions=accelerator.gather(predictions),
-                references=accelerator.gather(batch["labels"]),
-            )
+    #     model.eval()
+    #     for step, batch in enumerate(eval_dataloader):
+    #         outputs = model(**batch)
+    #         predictions = outputs.logits.argmax(dim=-1)
+    #         metric.add_batch(
+    #             predictions=accelerator.gather(predictions),
+    #             references=accelerator.gather(batch["labels"]),
+    #         )
 
-        eval_metric = metric.compute()
-        logger.info(f"mnli-mm: {eval_metric}")
+    #     eval_metric = metric.compute()
+    #     logger.info(f"mnli-mm: {eval_metric}")
 
     if args.output_dir is not None:
         all_results = {f"eval_{k}": v for k, v in eval_metric.items()}

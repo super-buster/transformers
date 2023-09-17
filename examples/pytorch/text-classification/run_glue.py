@@ -54,15 +54,7 @@ check_min_version("4.34.0.dev0")
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/text-classification/requirements.txt")
 
 task_to_keys = {
-    "cola": ("sentence", None),
-    "mnli": ("premise", "hypothesis"),
-    "mrpc": ("sentence1", "sentence2"),
-    "qnli": ("question", "sentence"),
-    "qqp": ("question1", "question2"),
-    "rte": ("sentence1", "sentence2"),
-    "sst2": ("sentence", None),
-    "stsb": ("sentence1", "sentence2"),
-    "wnli": ("sentence1", "sentence2"),
+    "newsflash/twitter":("title","content")
 }
 
 logger = logging.getLogger(__name__)
@@ -241,7 +233,8 @@ def main():
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_glue", model_args, data_args)
+    # this is very time-consuming, we don't report to hugging face hub til now.
+    # send_example_telemetry("run_glue_no_trainer", args)
 
     # Setup logging
     logging.basicConfig(
@@ -298,64 +291,16 @@ def main():
     #
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
-    if data_args.task_name is not None:
-        # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset(
-            "glue",
-            data_args.task_name,
-            cache_dir=model_args.cache_dir,
-            token=model_args.token,
-        )
-    elif data_args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset(
-            data_args.dataset_name,
-            data_args.dataset_config_name,
-            cache_dir=model_args.cache_dir,
-            token=model_args.token,
-        )
+    if data_args.task_name == "newsflash/twitter":
+        raw_datasets = load_dataset("json", data_files=data_args.train_file)["train"]
+        raw_datasets = raw_datasets.train_test_split(test_size=0.15, seed= training_args.seed, shuffle=True)
     else:
-        # Loading a dataset from your local files.
-        # CSV/JSON training and evaluation files are needed.
-        data_files = {"train": data_args.train_file, "validation": data_args.validation_file}
-
-        # Get the test dataset: you can provide your own CSV/JSON test file (see below)
-        # when you use `do_predict` without specifying a GLUE benchmark task.
-        if training_args.do_predict:
-            if data_args.test_file is not None:
-                train_extension = data_args.train_file.split(".")[-1]
-                test_extension = data_args.test_file.split(".")[-1]
-                assert (
-                    test_extension == train_extension
-                ), "`test_file` should have the same extension (csv or json) as `train_file`."
-                data_files["test"] = data_args.test_file
-            else:
-                raise ValueError("Need either a GLUE task or a test file for `do_predict`.")
-
-        for key in data_files.keys():
-            logger.info(f"load a local file for {key}: {data_files[key]}")
-
-        if data_args.train_file.endswith(".csv"):
-            # Loading a dataset from local csv files
-            raw_datasets = load_dataset(
-                "csv",
-                data_files=data_files,
-                cache_dir=model_args.cache_dir,
-                token=model_args.token,
-            )
-        else:
-            # Loading a dataset from local json files
-            raw_datasets = load_dataset(
-                "json",
-                data_files=data_files,
-                cache_dir=model_args.cache_dir,
-                token=model_args.token,
-            )
+        raw_datasets = load_dataset("glue", data_args.task_name)
     # See more about loading any type of standard or custom dataset at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
     # Labels
-    if data_args.task_name is not None:
+    if data_args.task_name not in task_to_keys.keys():
         is_regression = data_args.task_name == "stsb"
         if not is_regression:
             label_list = raw_datasets["train"].features["label"].names
@@ -489,9 +434,9 @@ def main():
             train_dataset = train_dataset.select(range(max_train_samples))
 
     if training_args.do_eval:
-        if "validation" not in raw_datasets and "validation_matched" not in raw_datasets:
+        if "validation" not in raw_datasets and "validation_matched" not in raw_datasets and "test" not in raw_datasets:
             raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = raw_datasets["validation_matched" if data_args.task_name == "mnli" else "validation"]
+        eval_dataset = raw_datasets["validation_matched" if data_args.task_name == "mnli" else "test"]
         if data_args.max_eval_samples is not None:
             max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
             eval_dataset = eval_dataset.select(range(max_eval_samples))
@@ -510,12 +455,15 @@ def main():
             logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
 
     # Get the metric function
-    if data_args.task_name is not None:
-        metric = evaluate.load("glue", data_args.task_name)
+    if data_args.task_name == "newsflash/twitter":
+        # metric = evaluate.load("accuracy")
+        # BUG: Module 'precision' doesn't exist on the Hugging Face Hub either.
+        # workaround: https://github.com/huggingface/evaluate/issues/456#issuecomment-1712629695
+        metric = evaluate.load("/share/yanzhongxiang/evaluate/metrics/precision/precision.py")
     elif is_regression:
         metric = evaluate.load("mse")
     else:
-        metric = evaluate.load("accuracy")
+        metric = evaluate.load("glue", data_args.task_name)
 
     # You can define your custom compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with a
     # predictions and label_ids field) and has to return a dictionary string to float.
@@ -574,14 +522,14 @@ def main():
         # Loop to handle MNLI double evaluation (matched, mis-matched)
         tasks = [data_args.task_name]
         eval_datasets = [eval_dataset]
-        if data_args.task_name == "mnli":
-            tasks.append("mnli-mm")
-            valid_mm_dataset = raw_datasets["validation_mismatched"]
-            if data_args.max_eval_samples is not None:
-                max_eval_samples = min(len(valid_mm_dataset), data_args.max_eval_samples)
-                valid_mm_dataset = valid_mm_dataset.select(range(max_eval_samples))
-            eval_datasets.append(valid_mm_dataset)
-            combined = {}
+        # if data_args.task_name == "mnli":
+        #     tasks.append("mnli-mm")
+        #     valid_mm_dataset = raw_datasets["validation_mismatched"]
+        #     if data_args.max_eval_samples is not None:
+        #         max_eval_samples = min(len(valid_mm_dataset), data_args.max_eval_samples)
+        #         valid_mm_dataset = valid_mm_dataset.select(range(max_eval_samples))
+        #     eval_datasets.append(valid_mm_dataset)
+        #     combined = {}
 
         for eval_dataset, task in zip(eval_datasets, tasks):
             metrics = trainer.evaluate(eval_dataset=eval_dataset)
@@ -591,13 +539,13 @@ def main():
             )
             metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
 
-            if task == "mnli-mm":
-                metrics = {k + "_mm": v for k, v in metrics.items()}
-            if task is not None and "mnli" in task:
-                combined.update(metrics)
+            # if task == "mnli-mm":
+            #     metrics = {k + "_mm": v for k, v in metrics.items()}
+            # if task is not None and "mnli" in task:
+            #     combined.update(metrics)
 
             trainer.log_metrics("eval", metrics)
-            trainer.save_metrics("eval", combined if task is not None and "mnli" in task else metrics)
+            trainer.save_metrics("eval", metrics)
 
     if training_args.do_predict:
         logger.info("*** Predict ***")
