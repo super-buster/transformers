@@ -27,7 +27,7 @@ from typing import Optional
 import datasets
 import evaluate
 import numpy as np
-from datasets import load_dataset
+from datasets import load_dataset, ClassLabel
 
 import transformers
 from transformers import (
@@ -304,6 +304,7 @@ def main():
     if data_args.task_name == "newsflash/twitter":
         raw_datasets = load_dataset("json", data_files=data_args.train_file)["train"]
         raw_datasets = raw_datasets.train_test_split(test_size=0.15, seed= training_args.seed, shuffle=True)
+        raw_datasets['test'].save_to_disk(os.path.join(training_args.output_dir,"test.arrow"))
     else:
         raw_datasets = load_dataset("glue", data_args.task_name)
     # See more about loading any type of standard or custom dataset at
@@ -420,6 +421,7 @@ def main():
             f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
         )
     max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
+    ClassLabels = ClassLabel(num_classes=num_labels, names=label_list)
 
     def preprocess_function(examples):
         # Tokenize the texts
@@ -429,11 +431,14 @@ def main():
         result = tokenizer(*args, padding=padding, max_length=max_seq_length, truncation=True)
 
         # Map labels to IDs (not necessary for GLUE tasks)
-        if label_to_id is not None and "label" in examples:
-            result["label"] = [(label_to_id[l] if l != -1 else -1) for l in examples["label"]]
+        # Refer: https://discuss.huggingface.co/t/class-labels-for-custom-datasets/15130/2
+        if "label" in examples:
+            result["label"] = ClassLabels.str2int(examples["label"])
         return result
 
     with training_args.main_process_first(desc="dataset map pre-processing"):
+        raw_datasets = raw_datasets.cast_column("label",ClassLabels)
+        # if there are other irrelevant columns or want to remove origin unprocessed columns, please use remove_columns arg.
         raw_datasets = raw_datasets.map(
             preprocess_function,
             batched=True,
