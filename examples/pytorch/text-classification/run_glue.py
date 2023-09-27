@@ -210,7 +210,17 @@ class ModelArguments:
         default=False,
         metadata={"help": "Will enable to load a pretrained model whose head dimensions are different."},
     )
+    reinit_pooler: Optional[bool] = field(
+        default=False,
+        metadata={"help": "reinit model's pooler weight to accelerate training."},
+    )
 
+@dataclass
+class TrainingArguments(TrainingArguments):
+    freeze_bias: Optional[bool] = field(
+        default=False,
+        metadata={"help": "freeze model's bias weight and layernorm bias."},
+    )
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -350,7 +360,12 @@ def main():
         trust_remote_code=model_args.trust_remote_code,
         ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
     )
-
+    if model_args.reinit_pooler and training_args.do_train:
+        model.bert.pooler.dense.weight.data.normal_(mean=0.0, std=model.config.initializer_range)
+        model.bert.pooler.dense.bias.data.zero_()
+        for p in model.bert.pooler.parameters():
+            p.requires_grad = True
+        print("Pooler layer reinit done!")
     # Preprocessing the raw_datasets
     if data_args.task_name is not None:
         sentence1_key, sentence2_key = task_to_keys[data_args.task_name]
@@ -484,10 +499,41 @@ def main():
     else:
         data_collator = None
 
+    # Split weights in two groups, one with weight decay and the other not.
+    no_decay = ["bias", "LayerNorm.weight"]
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+            "weight_decay": training_args.weight_decay,
+        },
+        {
+            "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+            "weight_decay": 0.0,
+        },
+    ]
+    # REVISITING FEW-SAMPLE BERT FINE-TUNING
+    optimizer = AdamW(optimizer_grouped_parameters, lr=training_args.learning_rate, correct_bias=True)
+
+    # Scheduler and math around the number of training steps.
+    import math
+    effective_batch_size = training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
+    num_update_steps_per_epoch = int(math.ceil(len(raw_datasets["train"]) / effective_batch_size))
+    if training_args.max_steps == -1:
+        training_args.max_steps = math.ceil(training_args.num_train_epochs * num_update_steps_per_epoch)
+
+    lr_scheduler = get_linear_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=training_args.warmup_steps,
+        num_training_steps=training_args.max_steps,
+    )
+    # print("lr: {} max_steps: {} ".format(training_args.learning_rate, training_args.max_steps))
     # Initialize our Trainer
+    
     trainer = Trainer(
         model=model,
         args=training_args,
+        # optimizers=(optimizer,lr_scheduler),
+        optimizers=(None,None) if training_args.freeze_bias != True else (optimizer,lr_scheduler),
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
         compute_metrics=compute_metrics,
