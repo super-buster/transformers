@@ -470,11 +470,18 @@ def main():
             logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
 
     # Get the metric function
-    if data_args.task_name == "newsflash/twitter":
-        # metric = evaluate.load("accuracy")
+    # if data_args.task_name == "newsflash/twitter":
+    #     pass
+        # metric = evaluate.load("/share/yanzhongxiang/evaluate/metrics/accuracy/accuracy.py")
         # BUG: Module 'precision' doesn't exist on the Hugging Face Hub either.
         # workaround: https://github.com/huggingface/evaluate/issues/456#issuecomment-1712629695
-        metric = evaluate.load("/share/yanzhongxiang/evaluate/metrics/precision/precision.py")
+        # if training_args.eval_metric == 'accuracy':
+        #     metric = evaluate.load("/share/yanzhongxiang/evaluate/metrics/accuracy/accuracy.py")
+        # elif training_args.eval_metric == 'precision':
+        #     metric = evaluate.load("/share/yanzhongxiang/evaluate/metrics/precision/precision.py")
+        # elif training_args.eval_metric == 'recall':
+        #     metric = evaluate.load("/share/yanzhongxiang/evaluate/metrics/recall/recall.py")
+
     elif is_regression:
         metric = evaluate.load("mse")
     else:
@@ -483,12 +490,29 @@ def main():
     # You can define your custom compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with a
     # predictions and label_ids field) and has to return a dictionary string to float.
     def compute_metrics(p: EvalPrediction):
+        metric_acc = evaluate.load("/share/yanzhongxiang/evaluate/metrics/accuracy/accuracy.py")
+        metric_precision = evaluate.load("/share/yanzhongxiang/evaluate/metrics/precision/precision.py")
+        metric_recall = evaluate.load("/share/yanzhongxiang/evaluate/metrics/recall/recall.py")
+        metrics = [metric_acc,metric_precision,metric_recall]
         preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
         preds = np.squeeze(preds) if is_regression else np.argmax(preds, axis=1)
-        result = metric.compute(predictions=preds, references=p.label_ids)
-        if len(result) > 1:
-            result["combined_score"] = np.mean(list(result.values())).item()
-        return result
+        all_results = dict()
+        for metric in metrics:
+            if metric.name == 'accuracy':
+                result = metric.compute(predictions=preds, references=p.label_ids)
+            else:
+                result = metric.compute(predictions=preds, references=p.label_ids, average= None)
+            if len(result) > 1:
+                result["combined_score"] = np.mean(list(result.values())).item()
+            all_results.update(result)
+        # for multi-class metric log
+        _k = []
+        for k,v in all_results.items():
+            if isinstance(v,np.ndarray):
+                _k.append(k)
+        for i in range(len(_k)):
+            all_results[_k[i]] = str(all_results[_k[i]].tolist())
+        return all_results
 
     # Data collator will default to DataCollatorWithPadding when the tokenizer is passed to Trainer, so we change it if
     # we already did the padding.
@@ -609,7 +633,9 @@ def main():
             predictions = trainer.predict(predict_dataset, metric_key_prefix="predict").predictions
             predictions = np.squeeze(predictions) if is_regression else np.argmax(predictions, axis=1)
 
-            output_predict_file = os.path.join(training_args.output_dir, f"predict_results_{task}.txt")
+            # write prediction to file
+            output_predict_file = os.path.join(training_args.output_dir, f"predict_results_{task.split('/')[-1]}.txt")
+            print("output predict file is： {}".format(output_predict_file))
             if trainer.is_world_process_zero():
                 with open(output_predict_file, "w") as writer:
                     logger.info(f"***** Predict results {task} *****")
