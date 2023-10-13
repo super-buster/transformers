@@ -270,7 +270,6 @@ def main():
         + f"distributed training: {training_args.parallel_mode.value == 'distributed'}, 16-bits training: {training_args.fp16}"
     )
     logger.info(f"Training/evaluation parameters {training_args}")
-
     # Detecting last checkpoint.
     last_checkpoint = None
     if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
@@ -302,9 +301,10 @@ def main():
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
     if data_args.task_name == "newsflash/twitter":
-        raw_datasets = load_dataset("json", data_files=data_args.train_file)["train"]
-        raw_datasets = raw_datasets.train_test_split(test_size=0.15, seed= training_args.seed, shuffle=True)
-        raw_datasets['test'].save_to_disk(os.path.join(training_args.output_dir,"test.arrow"))
+        raw_datasets = load_dataset("json", data_files={"train":data_args.train_file,"validation":data_args.validation_file,"test":data_args.test_file})
+        raw_datasets.save_to_disk(os.path.join(training_args.output_dir,"processed_data"))
+        # raw_datasets = raw_datasets.train_test_split(test_size=0.15, seed= training_args.seed, shuffle=True)
+        # raw_datasets['test'].save_to_disk(os.path.join(training_args.output_dir,"test.arrow"))
     else:
         raw_datasets = load_dataset("glue", data_args.task_name)
     # See more about loading any type of standard or custom dataset at
@@ -454,9 +454,9 @@ def main():
             train_dataset = train_dataset.select(range(max_train_samples))
 
     if training_args.do_eval:
-        if "validation" not in raw_datasets and "validation_matched" not in raw_datasets and "test" not in raw_datasets:
+        if "validation" not in raw_datasets and "validation_matched" not in raw_datasets:
             raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = raw_datasets["validation_matched" if data_args.task_name == "mnli" else "test"]
+        eval_dataset = raw_datasets["validation_matched" if data_args.task_name == "mnli" else "validation"]
         if data_args.max_eval_samples is not None:
             max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
             eval_dataset = eval_dataset.select(range(max_eval_samples))
@@ -489,8 +489,6 @@ def main():
 
     elif is_regression:
         metric = evaluate.load("mse")
-    else:
-        metric = evaluate.load("glue", data_args.task_name)
 
     # You can define your custom compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with a
     # predictions and label_ids field) and has to return a dictionary string to float.
@@ -596,7 +594,7 @@ def main():
 
         # Loop to handle MNLI double evaluation (matched, mis-matched)
         tasks = [data_args.task_name]
-        eval_datasets = [eval_dataset]
+        eval_datasets=[eval_dataset]
         # if data_args.task_name == "mnli":
         #     tasks.append("mnli-mm")
         #     valid_mm_dataset = raw_datasets["validation_mismatched"]
@@ -608,7 +606,6 @@ def main():
 
         for eval_dataset, task in zip(eval_datasets, tasks):
             metrics = trainer.evaluate(eval_dataset=eval_dataset)
-
             max_eval_samples = (
                 data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
             )
