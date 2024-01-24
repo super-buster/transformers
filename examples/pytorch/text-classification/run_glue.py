@@ -42,11 +42,17 @@ from transformers import (
     TrainingArguments,
     default_data_collator,
     set_seed,
+    AdamW,
+    get_linear_schedule_with_warmup
 )
+
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.34.0.dev0")
@@ -214,6 +220,10 @@ class ModelArguments:
         default=False,
         metadata={"help": "reinit model's pooler weight to accelerate training."},
     )
+    dropout_off: Optional[bool] = field(
+        default=True,
+        metadata={"help": "turn off dropout. Take Bert for example, hidden_dropout_prob and attention_probs_dropout_prob = 0 if this argument is set"},
+    )
 
 @dataclass
 class TrainingArguments(TrainingArguments):
@@ -222,6 +232,48 @@ class TrainingArguments(TrainingArguments):
         metadata={"help": "freeze model's bias weight and layernorm bias."},
     )
 
+class MultiCEFocalLoss():
+    def __init__(self, class_num, gamma=8, alpha=None, reduction='mean'):
+        super(MultiCEFocalLoss, self).__init__()
+        if alpha is None:
+            # self.alpha = torch.ones((class_num, 1),requires_grad=False)
+            self.alpha = torch.Tensor([[0.75],[2],[2]])
+        else:
+            self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.class_num =  class_num
+
+    def compute_loss(self, predict, target):
+        pt = F.softmax(predict, dim=1) # softmmax获取预测概率
+        class_mask = F.one_hot(target, self.class_num).to(pt.device) #获取target的one hot编码
+        ids = target.view(-1, 1).to(pt.device) 
+        alpha = self.alpha.to(pt.device)[ids.data.view(-1)] # 注意，这里的alpha是给定的一个list(tensor
+#),里面的元素分别是每一个类的权重因子
+        probs = (pt * class_mask).sum(1).view(-1, 1) # 利用onehot作为mask，提取对应的pt
+        log_p = probs.log()
+# 同样，原始ce上增加一个动态权重衰减因子
+        loss = -alpha * (torch.pow((1 - probs), self.gamma)) * log_p
+
+        if self.reduction == 'mean':
+            loss = loss.mean()
+        elif self.reduction == 'sum':
+            loss = loss.sum()
+        return loss
+
+    def __call__(self, model, inputs, return_outputs=False):
+        if "labels" in inputs:
+            labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        preds = outputs.logits
+        loss = self.compute_loss(preds,labels)
+        return (loss, outputs) if return_outputs else loss
+
+class CustomTrainer(Trainer):
+    def compute_loss(self, model, inputs, return_outputs=False):
+        loss_fn = MultiCEFocalLoss(class_num=3)
+        return loss_fn.__call__(model, inputs, return_outputs=return_outputs)
+    
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -343,6 +395,10 @@ def main():
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
     )
+    # remove dropout may do good to finetuing?
+    if model_args.dropout_off:
+        config.hidden_dropout_prob = 0.
+        config.attention_probs_dropout_prob = 0.
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
@@ -641,20 +697,20 @@ def main():
             if trainer.is_world_process_zero():
                 with open(output_predict_file, "w") as writer:
                     logger.info(f"***** Predict results {task} *****")
-                    writer.write("index\tprediction\n")
+                    writer.write("prediction\n")
                     for index, item in enumerate(predictions):
                         if is_regression:
                             writer.write(f"{index}\t{item:3.3f}\n")
                         else:
                             item = label_list[item]
-                            writer.write(f"{index}\t{item}\n")
+                            writer.write(f"{item}\n")
 
     kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "text-classification"}
     if data_args.task_name is not None:
         kwargs["language"] = "en"
         kwargs["dataset_tags"] = "newsflash"
         kwargs["dataset_args"] = data_args.task_name
-        kwargs["dataset"] = f"Royal Flash A8 {data_args.task_name.upper()}"
+        kwargs["dataset"] = f"Royal Flash A6 {data_args.task_name.upper()}"
 
     if training_args.push_to_hub:
         trainer.push_to_hub(**kwargs)
